@@ -1,11 +1,14 @@
-# video.js HLS Source Handler [![Build Status](https://travis-ci.org/videojs/videojs-contrib-hls.svg?branch=master)](https://travis-ci.org/videojs/videojs-contrib-hls)
+# Notice: this project will be deprecated and is succeeded by [videojs-http-streaming](https://github.com/videojs/http-streaming). VHS supports HLS and DASH and is built into video.js 7, see the [video.js 7 blog post](https://blog.videojs.com/video-js-7-is-here/)
 
+# video.js HLS Source Handler
+
+[![Build Status][travis-icon]][travis-link]
+[![Slack Status][slack-icon]][slack-link]
+[![Greenkeeper badge][greenkeeper-icon]][greenkeeper-link]
 
 Play back HLS with video.js, even where it's not natively supported.
 
-Lead Maintainer: Jon-Carlos Rivera [@imbcmdth](https://github.com/imbcmdth)
-
-Maintenance Status: Stable
+Maintenance Status: Deprecated
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
@@ -17,7 +20,9 @@ Maintenance Status: Stable
   - [Releases](#releases)
   - [Manual Build](#manual-build)
 - [Contributing](#contributing)
+- [Talk to us](#talk-to-us)
 - [Getting Started](#getting-started)
+  - [Video.js 6](#videojs-6)
 - [Documentation](#documentation)
   - [Options](#options)
     - [How to use](#how-to-use)
@@ -26,6 +31,10 @@ Maintenance Status: Stable
     - [List](#list)
       - [withCredentials](#withcredentials)
       - [useCueTags](#usecuetags)
+      - [overrideNative](#overridenative)
+      - [blacklistDuration](#blacklistduration)
+      - [bandwidth](#bandwidth)
+      - [enableLowInitialPlaylist](#enablelowinitialplaylist)
   - [Runtime Properties](#runtime-properties)
     - [hls.playlists.master](#hlsplaylistsmaster)
     - [hls.playlists.media](#hlsplaylistsmedia)
@@ -37,12 +46,14 @@ Maintenance Status: Stable
     - [hls.xhr](#hlsxhr)
   - [Events](#events)
     - [loadedmetadata](#loadedmetadata)
-    - [loadedplaylist](#loadedplaylist)
-    - [mediachange](#mediachange)
+  - [HLS Usage Events](#hls-usage-events)
+    - [Presence Stats](#presence-stats)
+    - [Use Stats](#use-stats)
   - [In-Band Metadata](#in-band-metadata)
+  - [Segment Metadata](#segment-metadata)
 - [Hosting Considerations](#hosting-considerations)
 - [Known Issues](#known-issues)
-  - [IE11](#ie11)
+  - [IE10 and Below](#ie10-and-below)
   - [Fragmented MP4 Support](#fragmented-mp4-support)
   - [Testing](#testing)
 - [Release History](#release-history)
@@ -62,7 +73,7 @@ npm install --save videojs-contrib-hls
 ```
 
 ### CDN
-Select a version of HLS from the [CDN](https://cdnjs.com/libraries/videojs-contrib-hls)
+Select a version of HLS from [cdnjs](https://cdnjs.com/libraries/videojs-contrib-hls) or [jsDelivr](https://www.jsdelivr.com/package/npm/videojs-contrib-hls)
 
 ### Releases
 Download a release of [videojs-contrib-hls](https://github.com/videojs/videojs-contrib-hls/releases)
@@ -72,6 +83,9 @@ Download a copy of this git repository and then follow the steps in [Building](#
 
 ## Contributing
 See [CONTRIBUTING.md](/CONTRIBUTING.md)
+
+## Talk to us
+Drop by our slack channel (#playback) on the [Video.js slack][slack-link].
 
 ## Getting Started
 Get a copy of [videojs-contrib-hls](#installation) and include it in your page along with video.js:
@@ -90,7 +104,23 @@ player.play();
 </script>
 ```
 
-Check out our [live example](http://jsbin.com/liwecukasi/edit?html,output) if you're having trouble.
+Check out our [live example](http://jsbin.com/vokipos/8/edit?html,output) if you're having trouble.
+
+### Video.js 6
+With Video.js 6, by default there is no flash support. Instead, flash support is provided
+through the [videojs-flash](https://github.com/videojs/videojs-flash) plugin. If you are
+trying to use Video.js version 6 and want to include flash support, you must include
+[videojs-flash](https://github.com/videojs/videojs-flash) on your page before including
+videojs-contrib-hls
+
+```html
+<script src="https://unpkg.com/videojs-flash/dist/videojs-flash.js"></script>
+<script src="https://unpkg.com/videojs-contrib-hls/dist/videojs-contrib-hls.js"></script>
+```
+
+Flash, and the [videojs-flash](https://github.com/videojs/videojs-flash) plugin, are not
+required, but are recommended as a fallback option for browsers that don't have a native
+HLS player or support for [Media Source Extensions](http://caniuse.com/#feat=mediasource).
 
 ## Documentation
 [HTTP Live Streaming](https://developer.apple.com/streaming/) (HLS) has
@@ -129,6 +159,8 @@ are some highlights:
 - AES-128 segment encryption
 - CEA-608 captions are automatically translated into standard HTML5
   [caption text tracks][0]
+- In-Manifest WebVTT subtitles are automatically translated into standard HTML5
+  subtitle tracks
 - Timed ID3 Metadata is automatically translated into HTML5 metedata
   text tracks
 - Highly customizable adaptive bitrate selection
@@ -172,7 +204,7 @@ videojs(video, {flash: {
 // or
 
 var options = {hls: {
-  withCredentials: true;
+  withCredentials: true
 }};
 
 videojs(video, {flash: options, html5: options});
@@ -188,7 +220,7 @@ Some options, such as `withCredentials` can be passed in to hls during
 var player = videojs('some-video-id');
 
 player.src({
-  src: "http://solutions.brightcove.com/jwhisenant/hls/apple/bipbop/bipbopall.m3u8",
+  src: 'https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8',
   type: 'application/x-mpegURL',
   withCredentials: true
 });
@@ -209,6 +241,16 @@ headers require the addition of `Access-Control-Allow-Credentials` header which
 is set to `true`.
 See html5rocks's [article](http://www.html5rocks.com/en/tutorials/cors/)
 for more info.
+
+##### handleManifestRedirects
+* Type: `boolean`
+* Default: `false`
+* can be used as a source option
+* can be used as an initialization option
+
+When the `handleManifestRedirects` property is set to `true`, manifest requests
+which are redirected will have their URL updated to the new URL for future
+requests.
 
 ##### useCueTags
 * Type: `boolean`
@@ -240,6 +282,50 @@ cuesTrack.addEventListener('cuechange', function() {
   }
 });
 ```
+
+##### overrideNative
+* Type: `boolean`
+* can be used as an initialization option
+
+Try to use videojs-contrib-hls even on platforms that provide some
+level of HLS support natively. There are a number of platforms that
+*technically* play back HLS content but aren't very reliable or are
+missing features like CEA-608 captions support. When `overrideNative`
+is true, if the platform supports Media Source Extensions
+videojs-contrib-hls will take over HLS playback to provide a more
+consistent experience.
+
+__NOTE__: If you use this option, you must also set
+`videojs.options.html5.nativeAudioTracks` and
+`videojs.options.html5.nativeVideoTracks` to
+`false`. videojs-contrib-hls relies on audio and video tracks to play
+streams with alternate audio and requires additional capabilities only
+supported by non-native tracks in video.js.
+
+##### blacklistDuration
+* Type: `number`
+* can be used as an initialization option
+
+When the `blacklistDuration` property is set to a time duration in seconds,
+if a playlist is blacklisted, it will be blacklisted for a period of that
+customized duration. This enables the blacklist duration to be configured
+by the user.
+
+##### bandwidth
+* Type: `number`
+* can be used as an initialization option
+
+When the `bandwidth` property is set (bits per second), it will be used in
+the calculation for initial playlist selection, before more bandwidth
+information is seen by the player.
+
+##### enableLowInitialPlaylist
+* Type: `boolean`
+* can be used as an initialization option
+
+When `enableLowInitialPlaylist` is set to true, it will be used to select
+the lowest bitrate playlist initially.  This helps to decrease playback start time.
+This setting is `false` by default.
 
 ### Runtime Properties
 Runtime properties are attached to the tech object when HLS is in
@@ -318,7 +404,24 @@ adaptive streaming logic.
 #### hls.representations
 Type: `function`
 
-To get all of the available representations, call the `representations()` method on `player.hls`. This will return a list of plain objects, each with `width`, `height`, `bandwidth`, and `id` properties, and an `enabled()` method.
+It is recommended to include the [videojs-contrib-quality-levels](https://github.com/videojs/videojs-contrib-quality-levels) plugin to your page so that videojs-contrib-hls will automatically populate the QualityLevelList exposed on the player by the plugin. You can access this list by calling `player.qualityLevels()`. See the [videojs-contrib-quality-levels project page](https://github.com/videojs/videojs-contrib-quality-levels) for more information on how to use the api.
+
+Example, only enabling representations with a width greater than or equal to 720:
+
+```javascript
+var qualityLevels = player.qualityLevels();
+
+for (var i = 0; i < qualityLevels.length; i++) {
+  var quality = qualityLevels[i];
+  if (quality.width >= 720) {
+    quality.enabled = true;
+  } else {
+    quality.enabled = false;
+  }
+}
+```
+
+If including [videojs-contrib-quality-levels](https://github.com/videojs/videojs-contrib-quality-levels) is not an option, you can use the representations api. To get all of the available representations, call the `representations()` method on `player.hls`. This will return a list of plain objects, each with `width`, `height`, `bandwidth`, and `id` properties, and an `enabled()` method.
 
 ```javascript
 player.hls.representations();
@@ -359,7 +462,9 @@ player.hls.xhr.beforeRequest = function(options) {
 
 The global `videojs.Hls` also exposes an `xhr` property. Specifying a
 `beforeRequest` function on that will allow you to intercept the options
-for *all* requests in every player on a page.
+for *all* requests in every player on a page. For consistency across
+browsers the video source should be set at runtime once the video player
+is ready.
 
 Example
 ```javascript
@@ -370,6 +475,14 @@ videojs.Hls.xhr.beforeRequest = function(options) {
 
   return options;
 };
+
+var player = videojs('video-player-id');
+player.ready(function() {
+  this.src({
+    src: 'https://d2zihajmogu5jn.cloudfront.net/bipbop-advanced/bipbop_16x9_variant.m3u8',
+    type: 'application/x-mpegURL',
+  });
+});
 ```
 
 For information on the type of options that you can modify see the
@@ -377,27 +490,60 @@ documentation at [https://github.com/Raynos/xhr](https://github.com/Raynos/xhr).
 
 ### Events
 Standard HTML video events are handled by video.js automatically and
-are triggered on the player object. In addition, there are a couple
-specialized events you can listen to on the HLS object during
-playback:
+are triggered on the player object.
 
 #### loadedmetadata
 
 Fired after the first segment is downloaded for a playlist. This will not happen
 until playback if video.js's `metadata` setting is `none`
 
-#### loadedplaylist
+### HLS Usage Events
 
-Fired immediately after a new master or media playlist has been
-downloaded. By default, the tech only downloads playlists as they
-are needed.
+Usage tracking events are fired when we detect a certain HLS feature, encoding setting,
+or API is used. These can be helpful for analytics, and to pinpoint the cause of HLS errors.
+For instance, if errors are being fired in tandem with a usage event indicating that the
+player was playing an AES encrypted stream, then we have a possible avenue to explore when
+debugging the error.
 
-#### mediachange
+Note that although these usage events are listed below, they may change at any time without
+a major version change.
 
-Fired when a new playlist becomes the active media playlist. Note that
-the actual rendering quality change does not occur simultaneously with
-this event; a new segment must be requested and the existing buffer
-depleted first.
+HLS usage events are triggered on the tech with the exception of the 3 hls-reload-error
+events, which are triggered on the player.
+
+#### Presence Stats
+
+Each of the following usage events are fired once per source if (and when) detected:
+
+| Name          | Description   |
+| ------------- | ------------- |
+| hls-webvtt    | master manifest has at least one segmented WebVTT playlist |
+| hls-aes       | a playlist is AES encrypted |
+| hls-fmp4      | a playlist used fMP4 segments |
+| hls-demuxed   | audio and video are demuxed by default |
+| hls-alternate-audio | alternate audio available in the master manifest |
+| hls-playlist-cue-tags | a playlist used cue tags (see useCueTags(#usecuetags) for details) |
+
+#### Use Stats
+
+Each of the following usage events are fired per use:
+
+| Name          | Description   |
+| ------------- | ------------- |
+| hls-gap-skip  | player skipped a gap in the buffer |
+| hls-player-access | player.hls was accessed |
+| hls-audio-change | a user selected an alternate audio stream |
+| hls-rendition-disabled | a rendition was disabled |
+| hls-rendition-enabled | a rendition was enabled |
+| hls-rendition-blacklisted | a rendition was blacklisted |
+| hls-timestamp-offset | a timestamp offset was set in HLS (can identify discontinuities) |
+| hls-unknown-waiting | the player stopped for an unknown reason and we seeked to current time try to address it |
+| hls-live-resync | playback fell off the back of a live playlist and we resynced to the live point |
+| hls-video-underflow | we seeked to current time to address video underflow |
+| hls-error-reload-initialized | the reloadSourceOnError plugin was initialized |
+| hls-error-reload | the reloadSourceOnError plugin reloaded a source |
+| hls-error-reload-canceled | an error occurred too soon after the last reload, so we didn't reload again (to prevent error loops) |
+
 
 ### In-Band Metadata
 The HLS tech supports [timed
@@ -420,6 +566,55 @@ cue.value.data
 There are lots of guides and references to using text tracks [around
 the web](http://www.html5rocks.com/en/tutorials/track/basics/).
 
+### Segment Metadata
+You can get metadata about the segments currently in the buffer by using the `segment-metadata`
+text track. You can get the metadata of the currently rendered segment by looking at the
+track's `activeCues` array. The metadata will be attached to the `cue.value` property and
+will have this structure
+
+```javascript
+cue.value = {
+  byteLength, // The size of the segment in bytes
+  bandwidth, // The peak bitrate reported by the segment's playlist
+  resolution, // The resolution reported by the segment's playlist
+  codecs, // The codecs reported by the segment's playlist
+  uri, // The Segment uri
+  timeline, // Timeline of the segment for detecting discontinuities
+  playlist, // The Playlist uri
+  start, // Segment start time
+  end // Segment end time
+};
+```
+
+Example:
+Detect when a change in quality is rendered on screen
+```javascript
+let tracks = player.textTracks();
+let segmentMetadataTrack;
+
+for (let i = 0; i < tracks.length; i++) {
+  if (tracks[i].label === 'segment-metadata') {
+    segmentMetadataTrack = tracks[i];
+  }
+}
+
+let previousPlaylist;
+
+if (segmentMetadataTrack) {
+  segmentMetadataTrack.on('cuechange', function() {
+    let activeCue = segmentMetadataTrack.activeCues[0];
+
+    if (activeCue) {
+      if (previousPlaylist !== activeCue.value.playlist) {
+        console.log('Switched from rendition ' + previousPlaylist +
+                    ' to rendition ' + activeCue.value.playlist);
+      }
+      previousPlaylist = activeCue.value.playlist;
+    }
+  });
+}
+```
+
 ## Hosting Considerations
 Unlike a native HLS implementation, the HLS tech has to comply with
 the browser's security policies. That means that all the files that
@@ -435,11 +630,8 @@ and most CDNs should have no trouble turning CORS on for your account.
 Issues that are currenty know about with workarounds. If you want to
 help find a solution that would be appreciated!
 
-### IE11
-In some IE11 setups there are issues working with its native HTML
-SourceBuffers functionality. This leads to various issues, such as
-videos stopping playback with media decode errors. The known workaround
-for this issues is to force the player to use flash when running on IE11.
+### IE10 and Below
+As of version 5.0.0, IE10 and below are no longer supported.
 
 ### Fragmented MP4 Support
 Edge has native support for HLS but only in the MPEG2-TS container. If
@@ -478,3 +670,10 @@ All commands for development are listed in the `package.json` file and are run u
 ```bash
 npm run <command>
 ```
+
+[slack-icon]: http://slack.videojs.com/badge.svg
+[slack-link]: http://slack.videojs.com
+[travis-icon]: https://travis-ci.org/videojs/videojs-contrib-hls.svg?branch=master
+[travis-link]: https://travis-ci.org/videojs/videojs-contrib-hls
+[greenkeeper-icon]: https://badges.greenkeeper.io/videojs/videojs-contrib-hls.svg
+[greenkeeper-link]: https://greenkeeper.io/

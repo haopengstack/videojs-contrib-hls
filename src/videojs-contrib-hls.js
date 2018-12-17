@@ -19,6 +19,12 @@ import renditionSelectionMixin from './rendition-mixin';
 import window from 'global/window';
 import PlaybackWatcher from './playback-watcher';
 import reloadSourceOnError from './reload-source-on-error';
+import {
+  lastBandwidthSelector,
+  lowestBitrateCompatibleVariantSelector,
+  comparePlaylistBandwidth,
+  comparePlaylistResolution
+} from './playlist-selectors.js';
 
 const Hls = {
   PlaylistLoader,
@@ -27,174 +33,83 @@ const Hls = {
   AsyncStream,
   decrypt,
   utils,
+
+  STANDARD_PLAYLIST_SELECTOR: lastBandwidthSelector,
+  INITIAL_PLAYLIST_SELECTOR: lowestBitrateCompatibleVariantSelector,
+  comparePlaylistBandwidth,
+  comparePlaylistResolution,
+
   xhr: xhrFactory()
 };
 
-Object.defineProperty(Hls, 'GOAL_BUFFER_LENGTH', {
-  get() {
-    videojs.log.warn('using Hls.GOAL_BUFFER_LENGTH is UNSAFE be sure ' +
-                     'you know what you are doing');
-    return Config.GOAL_BUFFER_LENGTH;
-  },
-  set(v) {
-    videojs.log.warn('using Hls.GOAL_BUFFER_LENGTH is UNSAFE be sure ' +
-                     'you know what you are doing');
-    if (typeof v !== 'number' || v <= 0) {
-      videojs.log.warn('value passed to Hls.GOAL_BUFFER_LENGTH ' +
-                       'must be a number and greater than 0');
-      return;
+// 0.5 MB/s
+const INITIAL_BANDWIDTH = 4194304;
+
+// Define getter/setters for config properites
+[
+  'GOAL_BUFFER_LENGTH',
+  'MAX_GOAL_BUFFER_LENGTH',
+  'GOAL_BUFFER_LENGTH_RATE',
+  'BUFFER_LOW_WATER_LINE',
+  'MAX_BUFFER_LOW_WATER_LINE',
+  'BUFFER_LOW_WATER_LINE_RATE',
+  'BANDWIDTH_VARIANCE'
+].forEach((prop) => {
+  Object.defineProperty(Hls, prop, {
+    get() {
+      videojs.log.warn(`using Hls.${prop} is UNSAFE be sure you know what you are doing`);
+      return Config[prop];
+    },
+    set(value) {
+      videojs.log.warn(`using Hls.${prop} is UNSAFE be sure you know what you are doing`);
+
+      if (typeof value !== 'number' || value < 0) {
+        videojs.log.warn(`value of Hls.${prop} must be greater than or equal to 0`);
+        return;
+      }
+
+      Config[prop] = value;
     }
-    Config.GOAL_BUFFER_LENGTH = v;
-  }
+  });
 });
 
-// A fudge factor to apply to advertised playlist bitrates to account for
-// temporary flucations in client bandwidth
-const BANDWIDTH_VARIANCE = 1.2;
-
 /**
- * Returns the CSS value for the specified property on an element
- * using `getComputedStyle`. Firefox has a long-standing issue where
- * getComputedStyle() may return null when running in an iframe with
- * `display: none`.
+ * Updates the selectedIndex of the QualityLevelList when a mediachange happens in hls.
  *
- * @see https://bugzilla.mozilla.org/show_bug.cgi?id=548397
- * @param {HTMLElement} el the htmlelement to work on
- * @param {string} the proprety to get the style for
+ * @param {QualityLevelList} qualityLevels The QualityLevelList to update.
+ * @param {PlaylistLoader} playlistLoader PlaylistLoader containing the new media info.
+ * @function handleHlsMediaChange
  */
-const safeGetComputedStyle = function(el, property) {
-  let result;
+const handleHlsMediaChange = function(qualityLevels, playlistLoader) {
+  let newPlaylist = playlistLoader.media();
+  let selectedIndex = -1;
 
-  if (!el) {
-    return '';
+  for (let i = 0; i < qualityLevels.length; i++) {
+    if (qualityLevels[i].id === newPlaylist.uri) {
+      selectedIndex = i;
+      break;
+    }
   }
 
-  result = window.getComputedStyle(el);
-  if (!result) {
-    return '';
-  }
-
-  return result[property];
+  qualityLevels.selectedIndex_ = selectedIndex;
+  qualityLevels.trigger({
+    selectedIndex,
+    type: 'change'
+  });
 };
 
 /**
- * Chooses the appropriate media playlist based on the current
- * bandwidth estimate and the player size.
+ * Adds quality levels to list once playlist metadata is available
  *
- * @return {Playlist} the highest bitrate playlist less than the currently detected
- * bandwidth, accounting for some amount of bandwidth variance
+ * @param {QualityLevelList} qualityLevels The QualityLevelList to attach events to.
+ * @param {Object} hls Hls object to listen to for media events.
+ * @function handleHlsLoadedMetadata
  */
-Hls.STANDARD_PLAYLIST_SELECTOR = function() {
-  let effectiveBitrate;
-  let sortedPlaylists = this.playlists.master.playlists.slice();
-  let bandwidthPlaylists = [];
-  let now = +new Date();
-  let i;
-  let variant;
-  let bandwidthBestVariant;
-  let resolutionPlusOne;
-  let resolutionPlusOneAttribute;
-  let resolutionBestVariant;
-  let width;
-  let height;
-
-  sortedPlaylists.sort(Hls.comparePlaylistBandwidth);
-
-  // filter out any playlists that have been excluded due to
-  // incompatible configurations or playback errors
-  sortedPlaylists = sortedPlaylists.filter((localVariant) => {
-    if (typeof localVariant.excludeUntil !== 'undefined') {
-      return now >= localVariant.excludeUntil;
-    }
-    return true;
+const handleHlsLoadedMetadata = function(qualityLevels, hls) {
+  hls.representations().forEach((rep) => {
+    qualityLevels.addQualityLevel(rep);
   });
-
-  // filter out any variant that has greater effective bitrate
-  // than the current estimated bandwidth
-  i = sortedPlaylists.length;
-  while (i--) {
-    variant = sortedPlaylists[i];
-
-    // ignore playlists without bandwidth information
-    if (!variant.attributes || !variant.attributes.BANDWIDTH) {
-      continue;
-    }
-
-    effectiveBitrate = variant.attributes.BANDWIDTH * BANDWIDTH_VARIANCE;
-
-    if (effectiveBitrate < this.systemBandwidth) {
-      bandwidthPlaylists.push(variant);
-
-      // since the playlists are sorted in ascending order by
-      // bandwidth, the first viable variant is the best
-      if (!bandwidthBestVariant) {
-        bandwidthBestVariant = variant;
-      }
-    }
-  }
-
-  i = bandwidthPlaylists.length;
-
-  // sort variants by resolution
-  bandwidthPlaylists.sort(Hls.comparePlaylistResolution);
-
-  // forget our old variant from above,
-  // or we might choose that in high-bandwidth scenarios
-  // (this could be the lowest bitrate rendition as  we go through all of them above)
-  variant = null;
-
-  width = parseInt(safeGetComputedStyle(this.tech_.el(), 'width'), 10);
-  height = parseInt(safeGetComputedStyle(this.tech_.el(), 'height'), 10);
-
-  // iterate through the bandwidth-filtered playlists and find
-  // best rendition by player dimension
-  while (i--) {
-    variant = bandwidthPlaylists[i];
-
-    // ignore playlists without resolution information
-    if (!variant.attributes ||
-        !variant.attributes.RESOLUTION ||
-        !variant.attributes.RESOLUTION.width ||
-        !variant.attributes.RESOLUTION.height) {
-      continue;
-    }
-
-    // since the playlists are sorted, the first variant that has
-    // dimensions less than or equal to the player size is the best
-    let variantResolution = variant.attributes.RESOLUTION;
-
-    if (variantResolution.width === width &&
-        variantResolution.height === height) {
-      // if we have the exact resolution as the player use it
-      resolutionPlusOne = null;
-      resolutionBestVariant = variant;
-      break;
-    } else if (variantResolution.width < width &&
-               variantResolution.height < height) {
-      // if both dimensions are less than the player use the
-      // previous (next-largest) variant
-      break;
-    } else if (!resolutionPlusOne ||
-               (variantResolution.width < resolutionPlusOneAttribute.width &&
-                variantResolution.height < resolutionPlusOneAttribute.height)) {
-      // If we still haven't found a good match keep a
-      // reference to the previous variant for the next loop
-      // iteration
-
-      // By only saving variants if they are smaller than the
-      // previously saved variant, we ensure that we also pick
-      // the highest bandwidth variant that is just-larger-than
-      // the video player
-      resolutionPlusOne = variant;
-      resolutionPlusOneAttribute = resolutionPlusOne.attributes.RESOLUTION;
-    }
-  }
-
-  // fallback chain of variants
-  return resolutionPlusOne ||
-    resolutionBestVariant ||
-    bandwidthBestVariant ||
-    sortedPlaylists[0];
+  handleHlsMediaChange(qualityLevels, hls.playlists);
 };
 
 // HLS is a source handler, not a tech. Make sure attempts to use it
@@ -211,7 +126,7 @@ Hls.supportsNativeHls = (function() {
   let video = document.createElement('video');
 
   // native HLS is definitely not supported if HTML5 video isn't
-  if (!videojs.getComponent('Html5').isSupported()) {
+  if (!videojs.getTech('Html5').isSupported()) {
     return false;
   }
 
@@ -245,26 +160,6 @@ Hls.isSupported = function() {
                           'your player\'s techOrder.');
 };
 
-const USER_AGENT = window.navigator && window.navigator.userAgent || '';
-
-/**
- * Determines whether the browser supports a change in the audio configuration
- * during playback. Currently only Firefox 48 and below do not support this.
- * window.isSecureContext is a propterty that was added to window in firefox 49,
- * so we can use it to detect Firefox 49+.
- *
- * @return {Boolean} Whether the browser supports audio config change during playback
- */
-Hls.supportsAudioInfoChange_ = function() {
-  if (videojs.browser.IS_FIREFOX) {
-    let firefoxVersionMap = (/Firefox\/([\d.]+)/i).exec(USER_AGENT);
-    let version = parseInt(firefoxVersionMap[1], 10);
-
-    return version >= 49;
-  }
-  return true;
-};
-
 const Component = videojs.getComponent('Component');
 
 /**
@@ -279,7 +174,7 @@ const Component = videojs.getComponent('Component');
  */
 class HlsHandler extends Component {
   constructor(source, tech, options) {
-    super(tech);
+    super(tech, options.hls);
 
     // tech.player() is deprecated but setup a reference to HLS for
     // backwards-compatibility
@@ -290,6 +185,7 @@ class HlsHandler extends Component {
         Object.defineProperty(_player, 'hls', {
           get: () => {
             videojs.log.warn('player.hls is deprecated. Use player.tech_.hls instead.');
+            tech.trigger({type: 'usage', name: 'hls-player-access'});
             return this;
           }
         });
@@ -300,10 +196,15 @@ class HlsHandler extends Component {
     this.source_ = source;
     this.stats = {};
     this.ignoreNextSeekingEvent_ = false;
-
-    // handle global & Source Handler level options
-    this.options_ = videojs.mergeOptions(videojs.options.hls || {}, options.hls);
     this.setOptions_();
+
+    // overriding native HLS only works if audio tracks have been emulated
+    // error early if we're misconfigured:
+    if (this.options_.overrideNative &&
+        (tech.featuresNativeVideoTracks || tech.featuresNativeAudioTracks)) {
+      throw new Error('Overriding native HLS requires emulated tracks. ' +
+                      'See https://git.io/vMpjB');
+    }
 
     // listen for fullscreenchange events for this player so that we
     // can adjust our quality selection quickly
@@ -335,10 +236,6 @@ class HlsHandler extends Component {
       }
     });
 
-    this.audioTrackChange_ = () => {
-      this.masterPlaylistController_.setupAudio();
-    };
-
     this.on(this.tech_, 'play', this.play);
   }
 
@@ -346,15 +243,24 @@ class HlsHandler extends Component {
     // defaults
     this.options_.withCredentials = this.options_.withCredentials || false;
 
-    // start playlist selection at a reasonable bandwidth for
-    // broadband internet
-    // 0.5 MB/s
-    if (typeof this.options_.bandwidth !== 'number') {
-      this.options_.bandwidth = 4194304;
+    if (typeof this.options_.blacklistDuration !== 'number') {
+      this.options_.blacklistDuration = 5 * 60;
     }
 
+    // start playlist selection at a reasonable bandwidth for
+    // broadband internet (0.5 MB/s) or mobile (0.0625 MB/s)
+    if (typeof this.options_.bandwidth !== 'number') {
+      this.options_.bandwidth = INITIAL_BANDWIDTH;
+    }
+
+    // If the bandwidth number is unchanged from the initial setting
+    // then this takes precedence over the enableLowInitialPlaylist option
+    this.options_.enableLowInitialPlaylist =
+       this.options_.enableLowInitialPlaylist &&
+       this.options_.bandwidth === INITIAL_BANDWIDTH;
+
     // grab options passed to player.src
-    ['withCredentials', 'bandwidth'].forEach((option) => {
+    ['withCredentials', 'bandwidth', 'handleManifestRedirects'].forEach((option) => {
       if (typeof this.source_[option] !== 'undefined') {
         this.options_[option] = this.source_[option];
       }
@@ -377,17 +283,27 @@ class HlsHandler extends Component {
     this.options_.url = this.source_.src;
     this.options_.tech = this.tech_;
     this.options_.externHls = Hls;
+
     this.masterPlaylistController_ = new MasterPlaylistController(this.options_);
     this.playbackWatcher_ = new PlaybackWatcher(
       videojs.mergeOptions(this.options_, {
         seekable: () => this.seekable()
       }));
 
+    this.masterPlaylistController_.on('error', () => {
+      let player = videojs.players[this.tech_.options_.playerId];
+
+      player.error(this.masterPlaylistController_.error);
+    });
+
     // `this` in selectPlaylist should be the HlsHandler for backwards
     // compatibility with < v2
     this.masterPlaylistController_.selectPlaylist =
       this.selectPlaylist ?
         this.selectPlaylist.bind(this) : Hls.STANDARD_PLAYLIST_SELECTOR.bind(this);
+
+    this.masterPlaylistController_.selectInitialPlaylist =
+      Hls.INITIAL_PLAYLIST_SELECTOR.bind(this);
 
     // re-expose some internal objects for backwards compatibility with < v2
     this.playlists = this.masterPlaylistController_.masterPlaylistLoader_;
@@ -425,7 +341,10 @@ class HlsHandler extends Component {
           // setting the bandwidth manually resets the throughput counter
           // `count` is set to zero that current value of `rate` isn't included
           // in the cumulative average
-          this.masterPlaylistController_.mainSegmentLoader_.throughput = {rate: 0, count: 0};
+          this.masterPlaylistController_.mainSegmentLoader_.throughput = {
+            rate: 0,
+            count: 0
+          };
         }
       },
       /**
@@ -467,6 +386,18 @@ class HlsHandler extends Component {
         get: () => this.masterPlaylistController_.mediaRequests_() || 0,
         enumerable: true
       },
+      mediaRequestsAborted: {
+        get: () => this.masterPlaylistController_.mediaRequestsAborted_() || 0,
+        enumerable: true
+      },
+      mediaRequestsTimedout: {
+        get: () => this.masterPlaylistController_.mediaRequestsTimedout_() || 0,
+        enumerable: true
+      },
+      mediaRequestsErrored: {
+        get: () => this.masterPlaylistController_.mediaRequestsErrored_() || 0,
+        enumerable: true
+      },
       mediaTransferDuration: {
         get: () => this.masterPlaylistController_.mediaTransferDuration_() || 0,
         enumerable: true
@@ -484,21 +415,9 @@ class HlsHandler extends Component {
     this.tech_.one('canplay',
       this.masterPlaylistController_.setupFirstPlay.bind(this.masterPlaylistController_));
 
-    this.masterPlaylistController_.on('sourceopen', () => {
-      this.tech_.audioTracks().addEventListener('change', this.audioTrackChange_);
-    });
-
     this.masterPlaylistController_.on('selectedinitialmedia', () => {
       // Add the manual rendition mix-in to HlsHandler
       renditionSelectionMixin(this);
-    });
-
-    this.masterPlaylistController_.on('audioupdate', () => {
-      // clear current audioTracks
-      this.tech_.clearTracks('audio');
-      this.masterPlaylistController_.activeAudioGroup().forEach((audioTrack) => {
-        this.tech_.audioTracks().addTrack(audioTrack);
-      });
     });
 
     // the bandwidth of the primary segment loader is our best
@@ -513,6 +432,8 @@ class HlsHandler extends Component {
       this.ignoreNextSeekingEvent_ = true;
     });
 
+    this.tech_.ready(() => this.setupQualityLevels_());
+
     // do nothing if the tech has been disposed already
     // this can occur if someone sets the src in player.ready(), for instance
     if (!this.tech_.el()) {
@@ -524,12 +445,25 @@ class HlsHandler extends Component {
   }
 
   /**
-   * a helper for grabbing the active audio group from MasterPlaylistController
+   * Initializes the quality levels and sets listeners to update them.
    *
+   * @method setupQualityLevels_
    * @private
    */
-  activeAudioGroup_() {
-    return this.masterPlaylistController_.activeAudioGroup();
+  setupQualityLevels_() {
+    let player = videojs.players[this.tech_.options_.playerId];
+
+    if (player && player.qualityLevels) {
+      this.qualityLevels_ = player.qualityLevels();
+
+      this.masterPlaylistController_.on('selectedinitialmedia', () => {
+        handleHlsLoadedMetadata(this.qualityLevels_, this);
+      });
+
+      this.playlists.on('mediachange', () => {
+        handleHlsMediaChange(this.qualityLevels_, this.playlists);
+      });
+    }
   }
 
   /**
@@ -570,7 +504,9 @@ class HlsHandler extends Component {
     if (this.masterPlaylistController_) {
       this.masterPlaylistController_.dispose();
     }
-    this.tech_.audioTracks().removeEventListener('change', this.audioTrackChange_);
+    if (this.qualityLevels_) {
+      this.qualityLevels_.dispose();
+    }
     super.dispose();
   }
 }
@@ -584,17 +520,21 @@ class HlsHandler extends Component {
  */
 const HlsSourceHandler = function(mode) {
   return {
-    canHandleSource(srcObj) {
+    canHandleSource(srcObj, options = {}) {
+      let localOptions = videojs.mergeOptions(videojs.options, options);
+
       // this forces video.js to skip this tech/mode if its not the one we have been
       // overriden to use, by returing that we cannot handle the source.
-      if (videojs.options.hls &&
-          videojs.options.hls.mode &&
-          videojs.options.hls.mode !== mode) {
+      if (localOptions.hls &&
+          localOptions.hls.mode &&
+          localOptions.hls.mode !== mode) {
         return false;
       }
-      return HlsSourceHandler.canPlayType(srcObj.type);
+      return HlsSourceHandler.canPlayType(srcObj.type, localOptions);
     },
-    handleSource(source, tech, options) {
+    handleSource(source, tech, options = {}) {
+      let localOptions = videojs.mergeOptions(videojs.options, options, {hls: {mode}});
+
       if (mode === 'flash') {
         // We need to trigger this asynchronously to give others the chance
         // to bind to the event when a source is set at player creation
@@ -603,22 +543,16 @@ const HlsSourceHandler = function(mode) {
         }, 1);
       }
 
-      let settings = videojs.mergeOptions(options, {hls: {mode}});
-
-      tech.hls = new HlsHandler(source, tech, settings);
-
+      tech.hls = new HlsHandler(source, tech, localOptions);
       tech.hls.xhr = xhrFactory();
-      // Use a global `before` function if specified on videojs.Hls.xhr
-      // but still allow for a per-player override
-      if (videojs.Hls.xhr.beforeRequest) {
-        tech.hls.xhr.beforeRequest = videojs.Hls.xhr.beforeRequest;
-      }
 
       tech.hls.src(source.src);
       return tech.hls;
     },
-    canPlayType(type) {
-      if (HlsSourceHandler.canPlayType(type)) {
+    canPlayType(type, options = {}) {
+      let localOptions = videojs.mergeOptions(videojs.options, options);
+
+      if (HlsSourceHandler.canPlayType(type, localOptions)) {
         return 'maybe';
       }
       return '';
@@ -626,76 +560,16 @@ const HlsSourceHandler = function(mode) {
   };
 };
 
-/**
- * A comparator function to sort two playlist object by bandwidth.
- *
- * @param {Object} left a media playlist object
- * @param {Object} right a media playlist object
- * @return {Number} Greater than zero if the bandwidth attribute of
- * left is greater than the corresponding attribute of right. Less
- * than zero if the bandwidth of right is greater than left and
- * exactly zero if the two are equal.
- */
-Hls.comparePlaylistBandwidth = function(left, right) {
-  let leftBandwidth;
-  let rightBandwidth;
-
-  if (left.attributes && left.attributes.BANDWIDTH) {
-    leftBandwidth = left.attributes.BANDWIDTH;
-  }
-  leftBandwidth = leftBandwidth || window.Number.MAX_VALUE;
-  if (right.attributes && right.attributes.BANDWIDTH) {
-    rightBandwidth = right.attributes.BANDWIDTH;
-  }
-  rightBandwidth = rightBandwidth || window.Number.MAX_VALUE;
-
-  return leftBandwidth - rightBandwidth;
-};
-
-/**
- * A comparator function to sort two playlist object by resolution (width).
- * @param {Object} left a media playlist object
- * @param {Object} right a media playlist object
- * @return {Number} Greater than zero if the resolution.width attribute of
- * left is greater than the corresponding attribute of right. Less
- * than zero if the resolution.width of right is greater than left and
- * exactly zero if the two are equal.
- */
-Hls.comparePlaylistResolution = function(left, right) {
-  let leftWidth;
-  let rightWidth;
-
-  if (left.attributes &&
-      left.attributes.RESOLUTION &&
-      left.attributes.RESOLUTION.width) {
-    leftWidth = left.attributes.RESOLUTION.width;
+HlsSourceHandler.canPlayType = function(type, options) {
+  // No support for IE 10 or below
+  if (videojs.browser.IE_VERSION && videojs.browser.IE_VERSION <= 10) {
+    return false;
   }
 
-  leftWidth = leftWidth || window.Number.MAX_VALUE;
-
-  if (right.attributes &&
-      right.attributes.RESOLUTION &&
-      right.attributes.RESOLUTION.width) {
-    rightWidth = right.attributes.RESOLUTION.width;
-  }
-
-  rightWidth = rightWidth || window.Number.MAX_VALUE;
-
-  // NOTE - Fallback to bandwidth sort as appropriate in cases where multiple renditions
-  // have the same media dimensions/ resolution
-  if (leftWidth === rightWidth &&
-      left.attributes.BANDWIDTH &&
-      right.attributes.BANDWIDTH) {
-    return left.attributes.BANDWIDTH - right.attributes.BANDWIDTH;
-  }
-  return leftWidth - rightWidth;
-};
-
-HlsSourceHandler.canPlayType = function(type) {
   let mpegurlRE = /^(audio|video|application)\/(x-|vnd\.apple\.)?mpegurl/i;
 
   // favor native HLS support if it's available
-  if (!videojs.options.hls.overrideNative && Hls.supportsNativeHls) {
+  if (!options.hls.overrideNative && Hls.supportsNativeHls) {
     return false;
   }
   return mpegurlRE.test(type);
@@ -707,21 +581,30 @@ if (typeof videojs.MediaSource === 'undefined' ||
   videojs.URL = URL;
 }
 
+const flashTech = videojs.getTech('Flash');
+
 // register source handlers with the appropriate techs
 if (MediaSource.supportsNativeMediaSources()) {
-  videojs.getComponent('Html5').registerSourceHandler(HlsSourceHandler('html5'), 0);
+  videojs.getTech('Html5').registerSourceHandler(HlsSourceHandler('html5'), 0);
 }
-if (window.Uint8Array) {
-  videojs.getComponent('Flash').registerSourceHandler(HlsSourceHandler('flash'));
+if (window.Uint8Array && flashTech) {
+  flashTech.registerSourceHandler(HlsSourceHandler('flash'));
 }
 
 videojs.HlsHandler = HlsHandler;
 videojs.HlsSourceHandler = HlsSourceHandler;
 videojs.Hls = Hls;
+if (!videojs.use) {
+  videojs.registerComponent('Hls', Hls);
+}
 videojs.m3u8 = m3u8;
-videojs.registerComponent('Hls', Hls);
 videojs.options.hls = videojs.options.hls || {};
-videojs.plugin('reloadSourceOnError', reloadSourceOnError);
+
+if (videojs.registerPlugin) {
+  videojs.registerPlugin('reloadSourceOnError', reloadSourceOnError);
+} else {
+  videojs.plugin('reloadSourceOnError', reloadSourceOnError);
+}
 
 module.exports = {
   Hls,

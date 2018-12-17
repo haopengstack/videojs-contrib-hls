@@ -31,6 +31,51 @@ const formatAsciiString = function(e) {
 };
 
 /**
+ * Creates an object for sending to a web worker modifying properties that are TypedArrays
+ * into a new object with seperated properties for the buffer, byteOffset, and byteLength.
+ *
+ * @param {Object} message
+ *        Object of properties and values to send to the web worker
+ * @return {Object}
+ *         Modified message with TypedArray values expanded
+ * @function createTransferableMessage
+ */
+const createTransferableMessage = function(message) {
+  const transferable = {};
+
+  Object.keys(message).forEach((key) => {
+    const value = message[key];
+
+    if (ArrayBuffer.isView(value)) {
+      transferable[key] = {
+        bytes: value.buffer,
+        byteOffset: value.byteOffset,
+        byteLength: value.byteLength
+      };
+    } else {
+      transferable[key] = value;
+    }
+  });
+
+  return transferable;
+};
+
+/**
+ * Returns a unique string identifier for a media initialization
+ * segment.
+ */
+const initSegmentId = function(initSegment) {
+  let byterange = initSegment.byterange || {
+    length: Infinity,
+    offset: 0
+  };
+
+  return [
+    byterange.length, byterange.offset, initSegment.resolvedUri
+  ].join(',');
+};
+
+/**
  * utils to help dump binary data to the console
  */
 const utils = {
@@ -59,7 +104,9 @@ const utils = {
       result += textRange(ranges, i) + ' ';
     }
     return result;
-  }
+  },
+  createTransferableMessage,
+  initSegmentId
 };
 
 export default utils;

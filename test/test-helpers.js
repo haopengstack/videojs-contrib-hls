@@ -1,5 +1,7 @@
 import document from 'global/document';
 import sinon from 'sinon';
+import window from 'global/window';
+import URLToolkit from 'url-toolkit';
 import videojs from 'video.js';
 /* eslint-disable no-unused-vars */
 // needed so MediaSource can be registered with videojs
@@ -7,7 +9,6 @@ import MediaSource from 'videojs-contrib-media-sources';
 /* eslint-enable */
 import testDataManifests from './test-manifests.js';
 import xhrFactory from '../src/xhr';
-import window from 'global/window';
 
 // a SourceBuffer that tracks updates but otherwise is a noop
 class MockSourceBuffer extends videojs.EventTarget {
@@ -82,10 +83,32 @@ class MockMediaSource extends videojs.EventTarget {
   }
 
   endOfStream(error) {
-    this.readyState = 'closed';
+    this.readyState = 'ended';
     this.error_ = error;
   }
 }
+
+export class MockTextTrack {
+  constructor() {
+    this.cues = [];
+  }
+  addCue(cue) {
+    this.cues.push(cue);
+  }
+  removeCue(cue) {
+    for (let i = 0; i < this.cues.length; i++) {
+      if (this.cues[i] === cue) {
+        this.cues.splice(i, 1);
+        break;
+      }
+    }
+  }
+}
+
+// return an absolute version of a page-relative URL
+export const absoluteUrl = function(relativeUrl) {
+  return URLToolkit.buildAbsoluteURL(window.location.href, relativeUrl);
+};
 
 export const useFakeMediaSource = function() {
   let RealMediaSource = videojs.MediaSource;
@@ -120,7 +143,7 @@ export const useFakeEnvironment = function(assert) {
       ['warn', 'error'].forEach((level) => {
         if (this.log && this.log[level] && this.log[level].restore) {
           if (assert) {
-            let calls = this.log[level].args.map((args) => {
+            let calls = (this.log[level].args || []).map((args) => {
               return args.join(', ');
             }).join('\n  ');
 
@@ -151,8 +174,43 @@ export const useFakeEnvironment = function(assert) {
   });
   fakeEnvironment.clock = sinon.useFakeTimers();
   fakeEnvironment.xhr = sinon.useFakeXMLHttpRequest();
+
+  // Sinon 1.10.2 handles abort incorrectly (triggering the error event)
+  // Later versions fixed this but broke the ability to set the response
+  // to an arbitrary object (in our case, a typed array).
+  XMLHttpRequest.prototype = Object.create(XMLHttpRequest.prototype);
+  XMLHttpRequest.prototype.abort = function abort() {
+    this.response = this.responseText = '';
+    this.errorFlag = true;
+    this.requestHeaders = {};
+    this.responseHeaders = {};
+
+    if (this.readyState > 0 && this.sendFlag) {
+      this.readyStateChange(4);
+      this.sendFlag = false;
+    }
+
+    this.readyState = 0;
+  };
+
+  XMLHttpRequest.prototype.downloadProgress = function downloadProgress(rawEventData) {
+    this.dispatchEvent(new sinon.ProgressEvent('progress',
+                                               rawEventData,
+                                               rawEventData.target));
+  };
+
+  // add support for xhr.responseURL
+  XMLHttpRequest.prototype.open = (function(origFn) {
+    return function() {
+      this.responseURL = absoluteUrl(arguments[1]);
+
+      return origFn.apply(this, arguments);
+    };
+  }(XMLHttpRequest.prototype.open));
+
   fakeEnvironment.requests.length = 0;
   fakeEnvironment.xhr.onCreate = function(xhr) {
+    xhr.responseURL = xhr.url;
     fakeEnvironment.requests.push(xhr);
   };
   videojs.xhr.XMLHttpRequest = fakeEnvironment.xhr;
@@ -227,12 +285,25 @@ export const mockTech = function(tech) {
   };
 };
 
-export const createPlayer = function(options) {
+export const createPlayer = function(options, src, clock) {
   let video;
   let player;
 
   video = document.createElement('video');
   video.className = 'video-js';
+  if (src) {
+    if (typeof src === 'string') {
+      video.src = src;
+    } else if (src.src) {
+      let source = document.createElement('source');
+
+      source.src = src.src;
+      if (src.type) {
+        source.type = src.type;
+      }
+      video.appendChild(source);
+    }
+  }
   document.querySelector('#qunit-fixture').appendChild(video);
   player = videojs(video, options || {
     flash: {
@@ -243,6 +314,11 @@ export const createPlayer = function(options) {
   player.buffered = function() {
     return videojs.createTimeRange(0, 0);
   };
+
+  if (clock) {
+    clock.tick(1);
+  }
+
   mockTech(player.tech_);
 
   return player;
@@ -263,6 +339,7 @@ export const openMediaSource = function(player, clock) {
     type: 'sourceopen',
     swfId: player.tech_.el().id
   });
+  clock.tick(1);
 };
 
 export const standardXHRResponse = function(request, data) {
@@ -294,36 +371,30 @@ export const standardXHRResponse = function(request, data) {
   request.respond(200, {'Content-Type': contentType}, data);
 };
 
-// return an absolute version of a page-relative URL
-export const absoluteUrl = function(relativeUrl) {
-  return window.location.protocol + '//' +
-    window.location.host +
-    (window.location.pathname
-        .split('/')
-        .slice(0, -1)
-        .concat(relativeUrl)
-        .join('/')
-    );
-};
-
 export const playlistWithDuration = function(time, conf) {
   let result = {
     targetDuration: 10,
     mediaSequence: conf && conf.mediaSequence ? conf.mediaSequence : 0,
     discontinuityStarts: [],
     segments: [],
-    endList: true
+    endList: conf && typeof conf.endList !== 'undefined' ? !!conf.endList : true,
+    uri: conf && typeof conf.uri !== 'undefined' ? conf.uri : 'playlist.m3u8',
+    discontinuitySequence:
+      conf && conf.discontinuitySequence ? conf.discontinuitySequence : 0,
+    attributes: conf && typeof conf.attributes !== 'undefined' ? conf.attributes : {}
   };
   let count = Math.floor(time / 10);
   let remainder = time % 10;
   let i;
   let isEncrypted = conf && conf.isEncrypted;
+  let extension = conf && conf.extension ? conf.extension : '.ts';
 
   for (i = 0; i < count; i++) {
     result.segments.push({
-      uri: i + '.ts',
-      resolvedUri: i + '.ts',
-      duration: 10
+      uri: i + extension,
+      resolvedUri: i + extension,
+      duration: 10,
+      timeline: result.discontinuitySequence
     });
     if (isEncrypted) {
       result.segments[i].key = {
@@ -334,8 +405,9 @@ export const playlistWithDuration = function(time, conf) {
   }
   if (remainder) {
     result.segments.push({
-      uri: i + '.ts',
-      duration: remainder
+      uri: i + extension,
+      duration: remainder,
+      timeline: result.discontinuitySequence
     });
   }
   return result;
